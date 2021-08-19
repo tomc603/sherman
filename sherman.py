@@ -69,4 +69,4 @@ def client(hostname, username):
 
 
 if __name__ == '__main__':
-    client("rhodes", "tom")
+    client("server.domain.tld", "tom")
