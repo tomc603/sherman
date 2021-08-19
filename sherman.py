@@ -44,8 +44,28 @@ def client(hostname, username):
     c = paramiko.SSHClient()
     c.load_system_host_keys()
     c.connect(hostname, 22, username, timeout=10, compress=True)
-    chan = c.invoke_shell()
-    shell(chan)
+
+    # Transfer any necessary script files to the remote host
+    # sftp = c.open_sftp()
+    # sftp.close()
+
+    # Execute commands on the server
+    chStdIn, chStdOut, chStdErr = c.exec_command('find /sys', timeout=1.0)
+    chStdIn.close()
+    print(u(chStdOut.read()))
+    print(u(chStdErr.read()))
+    status = chStdOut.channel.recv_exit_status()
+    print('Status: {}'.format(status))
+    chStdOut.close()
+    chStdErr.close()
+
+    # Execute a shell on the remote server
+    # chan = c.invoke_shell()
+    # shell(chan)
+    # chan.close()
+
+    # Close the SSH connection
+    c.close()
 
 
 if __name__ == '__main__':
