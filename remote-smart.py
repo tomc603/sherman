@@ -46,7 +46,7 @@ def config_to_connect_params(cfg) -> dict:
         translated_key = 'key_filename'
 
     if 'connecttimeout' in cfg:
-        timeout_val = float(cfg['connecttimeout'])
+        timeout_val = float(cfg['connecttimeout'].replace('s', ''))
         result['timeout'] = timeout_val
         result['banner_timeout'] = timeout_val
         result['auth_timeout'] = timeout_val
@@ -75,21 +75,17 @@ def config_to_connect_params(cfg) -> dict:
 
 def connect_host(hostname, username):
     parent_connection = None
-    ssh_config = paramiko.config.SSHConfig()
+    ssh_config = paramiko.SSHConfig()
     c = paramiko.SSHClient()
+    c.set_missing_host_key_policy(paramiko.AutoAddPolicy)
     c.specified_remote_hostname = hostname
 
     try:
-        ssh_config = paramiko.config.SSHConfig.from_path(
+        ssh_config = paramiko.SSHConfig.from_path(
             os.path.abspath(os.path.expanduser(os.path.expandvars('~/.ssh/config')))
         )
     except FileNotFoundError as ex:
         pass
-
-
-    # Connect to one host through a proxy host using a Transport
-    # paramiko.transport.Transport()
-    # c.get_transport().connect()
 
     client_ssh_config = ssh_config.lookup(hostname)
     connect_parameters = config_to_connect_params(client_ssh_config)
@@ -99,25 +95,47 @@ def connect_host(hostname, username):
         client_ssh_config['username'] = username
 
     if 'proxyjump' in client_ssh_config:
-        parent_connection = connect_host(client_ssh_config['proxyjump'], username=username)
-        trans = parent_connection.get_transport()
-        client_ssh_config['sock'] = trans
+        proxy_connection = connect_host(client_ssh_config['proxyjump'], username=username)
+        proxy_channel = proxy_connection.get_transport().open_channel(
+            'direct-tcpip',
+            (client_ssh_config['hostname'], client_ssh_config['port']),
+            ('', 0),
+            timeout=client_ssh_config['timeout']
+        )
+        client_ssh_config['sock'] = proxy_channel
 
     if 'proxycommand' in client_ssh_config:
-        pc = paramiko.proxy.ProxyCommand(client_ssh_config['proxycommand'])
-        client_ssh_config['sock'] = pc
+        proxy_channel = paramiko.ProxyCommand(client_ssh_config['proxycommand'])
+        client_ssh_config['sock'] = proxy_channel
 
-    c.load_system_host_keys()
-    # TODO: Create the keys file if it doesn't exist
-    # c.load_host_keys('sherman_host_keys')
+    if 'sock' in client_ssh_config and client_ssh_config['sock'] is None:
+        # A Proxy has been configured, but no proxy connecion has been configured
+        # so bail out now and report the error.
+        print(f'Error: Proxy connection for {hostname} has failed.')
+        return None
 
-    c.set_missing_host_key_policy(paramiko.AutoAddPolicy)
-    c.connect(**connect_parameters)
+    try:
+        c.load_system_host_keys()
+        # TODO: Create the keys file if it doesn't exist
+        # c.load_host_keys('sherman_host_keys')
+        c.connect(**connect_parameters)
+    except paramiko.AuthenticationException as ex:
+        print(f'Error: Authentication error for {username}@{hostname}. {ex}')
+        return None
+    except paramiko.BadHostKeyException as ex:
+        print(f'Error: Bad host key for {hostname}. {ex}')
+        return None
+    except paramiko.SSHException as ex:
+        print(f'Error: SSH exception for {hostname}. {ex}')
+        return None
+    except socket.error as ex:
+        print(f'Error: Socket error for {hostname}. {ex}')
+        return None
 
     return c
 
 
-def server_smartctl(c: paramiko.client.SSHClient, logpath):
+def server_smartctl(c: paramiko.SSHClient, logpath):
     device_pattern = r'(sd[a-z]+)\n'
     device_re = re.compile(device_pattern)
     scsi_devices = []
@@ -151,35 +169,25 @@ def server_smartctl(c: paramiko.client.SSHClient, logpath):
             stdout.close()
             stderr.close()
 
-    except paramiko.ssh_exception.SSHException as ex:
+    except paramiko.SSHException as ex:
         print(f'Error: SSH exception while running remote command on {c.specified_remote_hostname}. {ex}')
 
 
 def client(hostname, username, logpath):
-    c = paramiko.SSHClient()
-    c.remote_hostname = hostname
+    c = connect_host(hostname, username)
+    if c is None:
+        print(f'Connection to {hostname} failed.')
+        return
 
     try:
-        ssh_config = paramiko.config.SSHConfig.from_path(
-            os.path.abspath(os.path.expanduser(os.path.expandvars('~/.ssh/config')))
-        )
-
-        c.load_system_host_keys()
-
-        # Create the keys file if it doesn't exist
-        # c.load_host_keys('sherman_host_keys')
-        c.set_missing_host_key_policy(paramiko.AutoAddPolicy)
-        c.connect(hostname, 22, username, timeout=10, compress=True)
-        # c.save_host_keys('sherman_host_keys')
-
         server_smartctl(c=c, logpath=logpath)
-    except paramiko.ssh_exception.AuthenticationException as ex:
+    except paramiko.AuthenticationException as ex:
         print(f'Error: Authentication error for {username}@{hostname}. {ex}')
         return
-    except paramiko.ssh_exception.BadHostKeyException as ex:
+    except paramiko.BadHostKeyException as ex:
         print(f'Error: Bad host key for {hostname}. {ex}')
         return
-    except paramiko.ssh_exception.SSHException as ex:
+    except paramiko.SSHException as ex:
         print(f'Error: SSH exception for {hostname}. {ex}')
         return
     except socket.error as ex:
