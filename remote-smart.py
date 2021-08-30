@@ -2,19 +2,31 @@
 
 import argparse
 import getpass
+import logging
 import multiprocessing as mp
 import os
+
+import invoke
 import paramiko
 import re
+import select
 import socket
 import sys
+import time
 
+import fabric as fab
 from paramiko.py3compat import u
+
+logging.basicConfig(level=logging.DEBUG)
+logging.getLogger(__name__).setLevel(logging.DEBUG)
+logging.getLogger('paramiko').setLevel(logging.DEBUG)
 
 
 DEFAULT_TIMEOUT = 10.0
 DEFAULT_PORT = 22
 open_connections = {}
+PROMPT_SUDO_RE = r'\[sudo\] password for '
+PROMPT_2FA_RE = r'Duo two-factor login'
 
 
 def config_to_connect_params(cfg) -> dict:
@@ -135,52 +147,46 @@ def connect_host(hostname, username):
     return c
 
 
-def server_smartctl(c: paramiko.SSHClient, logpath):
+def fab_connect(hostname, username=None):
+    responder_sudo = invoke.Responder(
+        pattern=PROMPT_SUDO_RE,
+        response=f'{getpass.getpass("Server SUDO password: ")}\n'
+    )
+    responder_2fa = invoke.Responder(
+        pattern=PROMPT_2FA_RE,
+        response='1\n'
+    )
+    c = fab.Connection(hostname)
+    return c
+
+
+def fab_smartctl(c: fab.Connection, password: str = None, logpath: str = None):
     device_pattern = r'(sd[a-z]+)\n'
     device_re = re.compile(device_pattern)
     scsi_devices = []
 
-    # Get a list of devices in /dev/sd*
-    try:
-        sftp = c.open_sftp()
-        dev_contents = sftp.listdir('/dev')
-        scsi_devices = device_re.findall('\n'.join(dev_contents))
-        sftp.close()
-    except paramiko.ssh_exception.SSHException as ex:
-        print(f'Error: SSH exception while opening SFTP channel to {c.specified_remote_hostname}. {ex}')
+    sftp = c.sftp()
+    dev_contents = sftp.listdir('/dev')
+    scsi_devices = device_re.findall('\n'.join(dev_contents))
+    sftp.close()
 
-    # Run smartctl for each device
-    try:
-        for scsi_device in scsi_devices:
-            stdin, stdout, stderr = c.exec_command(f'sudo /usr/sbin/smartctl -x /dev/{scsi_device}')
-            stdin.close()
-            status = stdout.channel.recv_exit_status()
-            print(f'Status: {status}')
+    for scsi_device in scsi_devices:
+        output = ''
 
-            if logpath is not None and logpath != '':
-                with open(os.path.join(logpath, f'{c.specified_remote_hostname}.{scsi_device}.log'), 'w') as output_file:
-                    output_file.write(u(stdout.read()))
-            else:
-                print(u(stdout.read()))
-
-            errors = u(stderr.read())
-            if len(errors) > 0:
-                print(f'Error:\n{errors}')
-            stdout.close()
-            stderr.close()
-
-    except paramiko.SSHException as ex:
-        print(f'Error: SSH exception while running remote command on {c.specified_remote_hostname}. {ex}')
+        logging.info(f'Polling /dev/{scsi_device}')
+        r = c.sudo(f'/usr/sbin/smartctl -x /dev/{scsi_device}')
 
 
 def client(hostname, username, logpath):
-    c = connect_host(hostname, username)
+    # c = connect_host(hostname, username)
+    c = fab_connect(hostname)
     if c is None:
         print(f'Connection to {hostname} failed.')
         return
 
     try:
-        server_smartctl(c=c, logpath=logpath)
+        fab_smartctl(c, logpath=logpath)
+        # server_smartctl(c=c, logpath=logpath)
     except paramiko.AuthenticationException as ex:
         print(f'Error: Authentication error for {username}@{hostname}. {ex}')
         return
@@ -200,6 +206,13 @@ def client(hostname, username, logpath):
 
 if __name__ == '__main__':
     host_list = []
+    # TODO:
+    #   Use Fabric sudo helper to execute commands as sudo
+    #   Use Fabric Group management to handle a pool of devices
+    #     * fabric.group.ThreadingGroup
+    #   Use Config(override) to set sudo password in the Config
+    #   Validate that chained ProxyJump hosts work as configured
+    #   Retrieve results from commands and write to files
 
     # TODO: When user is NONE, use the SSH config, then fall back to current OS user.
     # TODO: If user _is_ specified, use it before SSH config.
