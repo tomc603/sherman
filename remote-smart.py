@@ -9,13 +9,10 @@ import os
 import invoke
 import paramiko
 import re
-import select
 import socket
 import sys
-import time
 
 import fabric as fab
-from paramiko.py3compat import u
 
 logging.basicConfig(level=logging.DEBUG)
 logging.getLogger(__name__).setLevel(logging.DEBUG)
@@ -26,63 +23,15 @@ DEFAULT_TIMEOUT = 10.0
 DEFAULT_PORT = 22
 open_connections = {}
 PROMPT_SUDO_RE = r'\[sudo\] password for '
-PROMPT_2FA_RE = r'Duo two-factor login'
-
-
-def config_to_connect_params(cfg) -> dict:
-    """
-    Convert openssh configuration parameters to paramiko's expected naming convention
-
-    :param cfg: Openssh configuration returned by .lookup()
-    :type param: dict
-    :return: Returns a sanitized dictionary of configuration parameters
-    """
-    result = {}
-
-    if 'hostname' in cfg:
-        result['hostname'] = cfg['hostname']
-
-    if 'port' in cfg:
-        result['port'] = int(cfg['port'])
-    else:
-        result['port'] = DEFAULT_PORT
-
-    # If no username is specified in the ssh config, use the current logged in username
-    if 'user' in cfg:
-        result['username'] = cfg['user']
-    else:
-        result['username'] = getpass.getuser()
-
-    if 'identityfile' in cfg:
-        result['key_filename'] = cfg['identityfile']
-        translated_key = 'key_filename'
-
-    if 'connecttimeout' in cfg:
-        timeout_val = float(cfg['connecttimeout'].replace('s', ''))
-        result['timeout'] = timeout_val
-        result['banner_timeout'] = timeout_val
-        result['auth_timeout'] = timeout_val
-    else:
-        result['timeout'] = DEFAULT_TIMEOUT
-        result['banner_timeout'] = DEFAULT_TIMEOUT
-        result['auth_timeout'] = DEFAULT_TIMEOUT
-
-    if 'forwardagent' in cfg:
-        result['allow_agent'] = (cfg['forwardagent'] == 'yes')
-
-    if 'compression' in cfg:
-        result['compress'] = (cfg['compression'] == 'yes')
-
-    if 'gssapikeyexchange' in cfg:
-        result['gss_auth'] = (cfg['gssapikeyexchange'] == 'yes')
-
-    if 'gssapiauthentication' in cfg:
-        result['gss_kex'] = (cfg['gssapiauthentication'] == 'yes')
-
-    if 'gssapidelegatecredentials' in cfg:
-        result['gss_deleg_creds'] = (cfg['gssapidelegatecredentials'] == 'yes')
-
-    return result
+PROMPT_2FA_RE = r'Passcode or option.*'
+#Duo two-factor login for tcameron
+#
+#Enter a passcode or select one of the following options:
+#
+#1. Duo Push to XXX-XXX-0124
+#
+#Passcode or option (1-1): 1
+SERVER_SUDO_PASSWORD = None
 
 
 def connect_host(hostname, username):
@@ -148,15 +97,25 @@ def connect_host(hostname, username):
 
 
 def fab_connect(hostname, username=None):
+    global SERVER_SUDO_PASSWORD
+
+    if SERVER_SUDO_PASSWORD is None:
+        SERVER_SUDO_PASSWORD = getpass.getpass("Server SUDO password: ")
+
     responder_sudo = invoke.Responder(
         pattern=PROMPT_SUDO_RE,
-        response=f'{getpass.getpass("Server SUDO password: ")}\n'
+        response=f'{SERVER_SUDO_PASSWORD}\n'
     )
     responder_2fa = invoke.Responder(
         pattern=PROMPT_2FA_RE,
         response='1\n'
     )
-    c = fab.Connection(hostname)
+
+    config = fab.Config()
+    config['run']['watchers'].append(responder_sudo)
+    config['run']['watchers'].append(responder_2fa)
+
+    c = fab.Connection(hostname, config=config)
     return c
 
 
@@ -174,7 +133,11 @@ def fab_smartctl(c: fab.Connection, password: str = None, logpath: str = None):
         output = ''
 
         logging.info(f'Polling /dev/{scsi_device}')
-        r = c.sudo(f'/usr/sbin/smartctl -x /dev/{scsi_device}')
+        result = c.run(f'sudo /usr/sbin/smartctl -x /dev/{scsi_device}', echo=False)
+        if result.return_code == 0:
+            print(result.stdout)
+        else:
+            logging.warn(f'Command existed with {result.return_code}\nSTDERR: {result.stderr}\nSTDOUT: {result.stdout}')
 
 
 def client(hostname, username, logpath):
