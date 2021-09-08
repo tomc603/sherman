@@ -1,22 +1,17 @@
 #!/usr/bin/env python3
 
 import argparse
-from typing import Union
 
 import fabric
 import getpass
 import logging
 import multiprocessing as mp
 import os
-
-import invoke
 import paramiko
 import re
 import socket
 import sys
-import time
 
-from paramiko.py3compat import u
 
 logging.basicConfig(level=logging.DEBUG)
 logging.getLogger(__name__).setLevel(logging.DEBUG)
@@ -64,10 +59,6 @@ def close_connection(hostname: str):
     :param hostname: Host name of the connected host.
     :type hostname: str
     """
-    connection: Union[fabric.Connection, None] = None
-    children: list = []
-    parent: str = ''
-
     try:
         children = connection_registry[hostname]['children']
         if children:
@@ -99,7 +90,7 @@ def open_connection(hostname: str):
     :param hostname: Host name of the desired host.
     :type hostname: str
     :return A Connection for the specified hostname
-    :rtype paramiko.Connection
+    :rtype fabric.Connection
     """
     if hostname in connection_registry:
         return connection_registry[hostname]['connection']
@@ -122,69 +113,7 @@ def open_connection(hostname: str):
     return connection_registry[hostname]['connection']
 
 
-def connect_host(hostname, username):
-    parent_connection = None
-    ssh_config = paramiko.SSHConfig()
-    c = paramiko.SSHClient()
-    c.set_missing_host_key_policy(paramiko.AutoAddPolicy)
-    c.specified_remote_hostname = hostname
-
-    try:
-        ssh_config = paramiko.SSHConfig.from_path(
-            os.path.abspath(os.path.expanduser(os.path.expandvars('~/.ssh/config')))
-        )
-    except FileNotFoundError as ex:
-        pass
-
-    client_ssh_config = ssh_config.lookup(hostname)
-    connect_parameters = config_to_connect_params(client_ssh_config)
-
-    # Always override the username if one is specified on the command line
-    if username is not None and username != "":
-        client_ssh_config['username'] = username
-
-    if 'proxyjump' in client_ssh_config:
-        proxy_connection = connect_host(client_ssh_config['proxyjump'], username=username)
-        proxy_channel = proxy_connection.get_transport().open_channel(
-            'direct-tcpip',
-            (client_ssh_config['hostname'], client_ssh_config['port']),
-            ('', 0),
-            timeout=client_ssh_config['timeout']
-        )
-        client_ssh_config['sock'] = proxy_channel
-
-    if 'proxycommand' in client_ssh_config:
-        proxy_channel = paramiko.ProxyCommand(client_ssh_config['proxycommand'])
-        client_ssh_config['sock'] = proxy_channel
-
-    if 'sock' in client_ssh_config and client_ssh_config['sock'] is None:
-        # A Proxy has been configured, but no proxy connecion has been configured
-        # so bail out now and report the error.
-        print(f'Error: Proxy connection for {hostname} has failed.')
-        return None
-
-    try:
-        c.load_system_host_keys()
-        # TODO: Create the keys file if it doesn't exist
-        # c.load_host_keys('sherman_host_keys')
-        c.connect(**connect_parameters)
-    except paramiko.AuthenticationException as ex:
-        print(f'Error: Authentication error for {username}@{hostname}. {ex}')
-        return None
-    except paramiko.BadHostKeyException as ex:
-        print(f'Error: Bad host key for {hostname}. {ex}')
-        return None
-    except paramiko.SSHException as ex:
-        print(f'Error: SSH exception for {hostname}. {ex}')
-        return None
-    except socket.error as ex:
-        print(f'Error: Socket error for {hostname}. {ex}')
-        return None
-
-    return c
-
-
-def fab_smartctl(c: fabric.Connection, password: str = None, logpath: str = None):
+def fab_smartctl(c: fabric.Connection, logpath: str = None):
     device_pattern = r'(sd[a-z]+)\n'
     device_re = re.compile(device_pattern)
     scsi_devices = []
