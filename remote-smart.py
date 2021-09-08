@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 
 import argparse
+from typing import Union
+
+import fabric
 import getpass
 import logging
 import multiprocessing as mp
@@ -11,8 +14,9 @@ import paramiko
 import re
 import socket
 import sys
+import time
 
-import fabric as fab
+from paramiko.py3compat import u
 
 logging.basicConfig(level=logging.DEBUG)
 logging.getLogger(__name__).setLevel(logging.DEBUG)
@@ -21,17 +25,101 @@ logging.getLogger('paramiko').setLevel(logging.DEBUG)
 
 DEFAULT_TIMEOUT = 10.0
 DEFAULT_PORT = 22
-open_connections = {}
 PROMPT_SUDO_RE = r'\[sudo\] password for '
-PROMPT_2FA_RE = r'Passcode or option.*'
-#Duo two-factor login for tcameron
-#
-#Enter a passcode or select one of the following options:
-#
-#1. Duo Push to XXX-XXX-0124
-#
-#Passcode or option (1-1): 1
-SERVER_SUDO_PASSWORD = None
+PROMPT_2FA_RE = r'Duo two-factor login'
+
+# Cache for host connections
+connection_registry = {
+    'gateway.host.tld': {
+        'connection': fabric.Connection,
+        'parent': None,
+        'children': ['proxy.host.tld', 'some_other.host.tld']
+    },
+    'proxy.host.tld': {
+        'connection': fabric.Connection,
+        'parent': 'gateway.host.tld',
+        'children': ['example.host.tld']
+    },
+    'example.host.tld': {
+        'connection': fabric.Connection,
+        'parent': 'proxy.host.tld'
+    },
+    'some_other.host.tld': {
+        'connection': fabric.Connection,
+        'parent': 'gateway.host.tld'
+    }
+}
+
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger()
+logger.setLevel(logging.WARNING)
+
+
+def close_connection(hostname: str):
+    """
+    Close the connection for the specified host. If the connection has child connections, iterate through them,
+    calling this function recursively. Remove our child entry if we have a parent connection (gateway/proxy).
+    Finally, remove our connection entry from connection_registry.
+
+    :param hostname: Host name of the connected host.
+    :type hostname: str
+    """
+    connection: Union[fabric.Connection, None] = None
+    children: list = []
+    parent: str = ''
+
+    try:
+        children = connection_registry[hostname]['children']
+        if children:
+            for child in children:
+                close_connection(child)
+    except KeyError:
+        pass
+
+    try:
+        parent = connection_registry[hostname]['parent']
+        if parent:
+            connection_registry[parent]['children'].remove(hostname)
+    except KeyError:
+        pass
+
+    try:
+        connection = connection_registry[hostname]['connection']
+        connection.close()
+        del(connection_registry[hostname])
+    except KeyError:
+        pass
+
+
+def open_connection(hostname: str):
+    """
+    Open a connection for the specified host. If the host has a ProxyJump server specified, connect through that proxy
+     and add a a child entry to its children list. Finally, add our connection entry to connection_registry.
+
+    :param hostname: Host name of the desired host.
+    :type hostname: str
+    :return A Connection for the specified hostname
+    :rtype paramiko.Connection
+    """
+    if hostname in connection_registry:
+        return connection_registry[hostname]['connection']
+
+    ssh_config = fabric.config.SSHConfig().from_path('.sshconfig')
+    fab_config = fabric.Config(ssh_config=ssh_config)
+    fab_config.load_base_conf_files()
+
+    # If a ProxyJump gateway is configured, pass it as the gateway for the current connection.
+    # Cache the gateway connection so we can reuse it for future host connections
+    gateway = None
+    gateway_hostname = ''
+    if 'proxyjump' in ssh_config.lookup(hostname):
+        gateway_hostname = ssh_config.lookup(hostname)['proxyjump']
+        gateway = open_connection(gateway_hostname)
+        connection_registry[gateway_hostname]['children'].append(hostname)
+
+    connection = fabric.Connection(hostname, gateway=gateway)
+    connection_registry[hostname] = {'children': [], 'parent': gateway_hostname, 'connection': connection}
+    return connection_registry[hostname]['connection']
 
 
 def connect_host(hostname, username):
@@ -96,30 +184,7 @@ def connect_host(hostname, username):
     return c
 
 
-def fab_connect(hostname, username=None):
-    global SERVER_SUDO_PASSWORD
-
-    if SERVER_SUDO_PASSWORD is None:
-        SERVER_SUDO_PASSWORD = getpass.getpass("Server SUDO password: ")
-
-    responder_sudo = invoke.Responder(
-        pattern=PROMPT_SUDO_RE,
-        response=f'{SERVER_SUDO_PASSWORD}\n'
-    )
-    responder_2fa = invoke.Responder(
-        pattern=PROMPT_2FA_RE,
-        response='1\n'
-    )
-
-    config = fab.Config()
-    config['run']['watchers'].append(responder_sudo)
-    config['run']['watchers'].append(responder_2fa)
-
-    c = fab.Connection(hostname, config=config)
-    return c
-
-
-def fab_smartctl(c: fab.Connection, password: str = None, logpath: str = None):
+def fab_smartctl(c: fabric.Connection, password: str = None, logpath: str = None):
     device_pattern = r'(sd[a-z]+)\n'
     device_re = re.compile(device_pattern)
     scsi_devices = []
@@ -133,23 +198,17 @@ def fab_smartctl(c: fab.Connection, password: str = None, logpath: str = None):
         output = ''
 
         logging.info(f'Polling /dev/{scsi_device}')
-        result = c.run(f'sudo /usr/sbin/smartctl -x /dev/{scsi_device}', echo=False)
-        if result.return_code == 0:
-            print(result.stdout)
-        else:
-            logging.warn(f'Command existed with {result.return_code}\nSTDERR: {result.stderr}\nSTDOUT: {result.stdout}')
+        r = c.sudo(f'/usr/sbin/smartctl -x /dev/{scsi_device}')
 
 
 def client(hostname, username, logpath):
-    # c = connect_host(hostname, username)
-    c = fab_connect(hostname)
+    c = open_connection(hostname)
     if c is None:
         print(f'Connection to {hostname} failed.')
         return
 
     try:
         fab_smartctl(c, logpath=logpath)
-        # server_smartctl(c=c, logpath=logpath)
     except paramiko.AuthenticationException as ex:
         print(f'Error: Authentication error for {username}@{hostname}. {ex}')
         return
@@ -164,18 +223,15 @@ def client(hostname, username, logpath):
         return
     finally:
         # Close the SSH connection
-        c.close()
+        close_connection(hostname)
 
 
 if __name__ == '__main__':
     host_list = []
     # TODO:
-    #   Use Fabric sudo helper to execute commands as sudo
     #   Use Fabric Group management to handle a pool of devices
     #     * fabric.group.ThreadingGroup
-    #   Use Config(override) to set sudo password in the Config
-    #   Validate that chained ProxyJump hosts work as configured
-    #   Retrieve results from commands and write to files
+    #   Retrieve results from commands and write to local per-server log files
 
     # TODO: When user is NONE, use the SSH config, then fall back to current OS user.
     # TODO: If user _is_ specified, use it before SSH config.
