@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import fabric
 import paramiko
 import termios
 import socket
