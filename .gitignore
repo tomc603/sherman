@@ -84,6 +84,7 @@
 .scrapy
 .spyderproject
 .spyproject
+.sshconfig
 .tox/
 .venv
 .vscode/*

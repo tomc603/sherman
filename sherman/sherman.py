@@ -12,10 +12,13 @@ from paramiko.py3compat import u
 
 
 # TODO:
-#   Send script to remote server
-#   Run script on remote server
-#   Save script output to log file on remote server
-#   Transfer log file from remote server
+#   Convert to using Fabric
+#   Make a CLI for various common commands
+#     * Create job scripts for common functions
+#     * For script jobs, send script to remote server & run it
+#     * Run common commands on remote server
+#     * Optionally log all output, command output
+#     * Use fabric.group.ThreadingGroup when running commands on multiple servers
 
 def send_file(channel: paramiko.channel.Channel, localpath: str, remotepath: str):
     try:
