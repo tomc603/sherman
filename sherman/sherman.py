@@ -11,6 +11,11 @@ import tty
 from paramiko.py3compat import u
 
 
+# Overview:
+# Sherman connects to remote hosts, and executes the commands within each "job" module through those connections.
+# Optionally, connections may be made through a Proxy server. If a proxy server is utilized, multiple connections
+# mnay be made through a single proxy to keep the total number of connections low.
+
 # TODO:
 #   Convert to using Fabric
 #   Make a CLI for various common commands
